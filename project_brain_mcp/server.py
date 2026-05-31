@@ -1,7 +1,7 @@
 from mcp.server.fastmcp import FastMCP
 from pathlib import Path
 from datetime import datetime, timezone
-import json, os, re, uuid
+import hashlib, json, os, re, uuid
 
 mcp = FastMCP(
     "Project Brain",
@@ -17,8 +17,12 @@ MANDATORY RULES — follow these before every response:
    - Same project → hard conflict (must resolve before proceeding).
    - Different project → soft reference (consider, don't blindly block).
 3. Call add_decision/add_finding/add_mistake with the current project name immediately
-   when a decision is confirmed, a mistake is found, or a question is answered.
+   when a decision is confirmed, a mistake is found, a question is answered,
+   OR when you understand how a framework/library/codebase component works.
    Never wait until session end.
+4. Before starting implementation, verify relevant findings still match the current
+   codebase. If a stored finding is outdated or inaccurate, call add_finding again
+   with the same question to update it before proceeding.
 
 These rules exist to prevent re-investigating solved problems and repeating rejected architectures.
 """
@@ -45,7 +49,9 @@ def load_db() -> dict:
     return data
 
 def save_db(data: dict):
-    DB_PATH.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp = DB_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(DB_PATH)
 
 def _keywords(text: str) -> set[str]:
     return set(re.findall(r"[a-zA-Z0-9]+", text.lower()))
@@ -67,6 +73,8 @@ def _slim(entry: dict, entry_type: str) -> dict:
         "tags":       entry.get("tags", []),
         "created_at": entry.get("created_at"),
     }
+    if entry.get("updated_at"):
+        base["updated_at"] = entry["updated_at"]
     if entry_type == "decisions":
         base["title"] = entry["title"]
     elif entry_type == "findings":
@@ -126,7 +134,9 @@ def add_decision(title: str, reason: str, tags: list[str], project: str = "unkno
     project: repository folder name (e.g. 'ocli', 'project-brain').
     Do not wait until session end. Tags are used for future conflict detection."""
     db = load_db()
-    entry_id = title.lower().replace(" ", "-")
+    slug = re.sub(r"[^a-z0-9-]", "", title.lower().replace(" ", "-"))[:30]
+    hash_suffix = hashlib.md5(title.encode()).hexdigest()[:8]
+    entry_id = f"{slug}{hash_suffix}" if slug else hash_suffix
     for existing in db["decisions"]:
         if existing["id"] == entry_id:
             existing["reason"]     = reason
@@ -154,18 +164,31 @@ def add_decision(title: str, reason: str, tags: list[str], project: str = "unkno
 
 @mcp.tool()
 def add_finding(question: str, conclusion: str, tags: list[str], project: str = "unknown") -> dict:
-    """Call this when an investigation question has been answered.
+    """Add or update a finding (upsert by question).
+    Call when an investigation question is answered, OR when you've analyzed how a
+    framework/library/codebase component works — use question as the topic title in that case.
+    If a finding with this question already exists, updates conclusion/tags/project.
     project: repository folder name (e.g. 'ocli', 'project-brain').
-    Prevents re-investigating the same question in future sessions.
     Do not wait until session end."""
     db = load_db()
+    slug = re.sub(r"[^a-z0-9-]", "", question.lower().replace(" ", "-"))[:30]
+    hash_suffix = hashlib.md5(question.encode()).hexdigest()[:8]
+    entry_id = f"finding-{slug}{hash_suffix}" if slug else f"finding-{hash_suffix}"
+    for existing in db["findings"]:
+        if existing["id"] == entry_id:
+            existing["conclusion"] = conclusion
+            existing["tags"]       = [t.lower() for t in tags]
+            existing["project"]    = project
+            existing["updated_at"] = _now()
+            db["state"]["version"] += 1
+            save_db(db)
+            return existing
     entry = {
-        "id":         f"finding-{uuid.uuid4().hex[:8]}",
+        "id":         entry_id,
         "project":    project,
         "question":   question,
         "conclusion": conclusion,
         "tags":       [t.lower() for t in tags],
-        "scope":      db["state"]["current_focus"],
         "created_at": _now(),
     }
     db["findings"].append(entry)
@@ -185,7 +208,6 @@ def add_mistake(description: str, lesson: str, tags: list[str] | None = None, pr
     entry = {
         "id":          f"mistake-{uuid.uuid4().hex[:8]}",
         "project":     project,
-        "scope":       db["state"]["current_focus"],
         "description": description,
         "lesson":      lesson,
         "tags":        [t.lower() for t in (tags or [])],
