@@ -11,10 +11,8 @@ Engineering memory for Claude Code — prevents re-investigating solved problems
 
 ## Installation
 
-Requires [pipx](https://pipx.pypa.io/stable/installation/).
-
 ```bash
-pipx install git+https://github.com/pym2282/project-brain-mcp
+pip install git+https://github.com/pym2282/project-brain-mcp
 claude mcp add project-brain project-brain-mcp --scope user
 ```
 
