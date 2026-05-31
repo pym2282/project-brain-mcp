@@ -18,6 +18,13 @@ claude mcp add project-brain project-brain-mcp --scope user
 
 Restart Claude Code. The MCP server is now active in all your projects.
 
+## Uninstall
+
+```bash
+pip uninstall project-brain-mcp
+claude mcp remove project-brain --scope user
+```
+
 ## Memory location
 
 Memory is stored at `~/.project-brain/memory.json` — shared across all projects, never committed to any repo.
