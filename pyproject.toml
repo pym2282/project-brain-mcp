@@ -1,0 +1,14 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "project-brain-mcp"
+version = "0.1.0"
+description = "Engineering memory MCP server — prevents re-investigating solved problems and repeating rejected architectures across Claude Code sessions."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["mcp[cli]>=1.0.0"]
+
+[project.scripts]
+project-brain-mcp = "project_brain_mcp.server:main"
