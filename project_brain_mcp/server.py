@@ -16,6 +16,9 @@ MANDATORY RULES — follow these before every response:
    implementation approach. current_project is required — use the repo folder name.
    - Same project → hard conflict (must resolve before proceeding).
    - Different project → soft reference (consider, don't blindly block).
+   - prior_analysis → previously stored findings relevant to the plan. If any finding
+     is outdated or you now know more detail, call add_finding with the same question
+     to update it before proceeding.
 3. Call add_decision/add_finding/add_mistake with the current project name immediately
    when a decision is confirmed, a mistake is found, a question is answered,
    OR when you understand how a framework/library/codebase component works.
@@ -23,6 +26,8 @@ MANDATORY RULES — follow these before every response:
 4. Before starting implementation, verify relevant findings still match the current
    codebase. If a stored finding is outdated or inaccurate, call add_finding again
    with the same question to update it before proceeding.
+5. If add_finding returns consolidation_suggested=True, ask the user whether to
+   organize findings now, then call consolidate_findings() if they agree.
 
 These rules exist to prevent re-investigating solved problems and repeating rejected architectures.
 """
@@ -37,12 +42,13 @@ def _now() -> str:
 def load_db() -> dict:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     if not DB_PATH.exists():
-        empty = {"state": {"version": 1, "current_focus": [], "open_questions": []},
+        empty = {"state": {"version": 1, "current_focus": [], "open_questions": [], "findings_since_review": 0},
                  "decisions": [], "findings": [], "mistakes": []}
         DB_PATH.write_text(json.dumps(empty, indent=2, ensure_ascii=False), encoding="utf-8")
         return empty
     data = json.loads(DB_PATH.read_text(encoding="utf-8"))
-    data.setdefault("state", {"version": 1, "current_focus": [], "open_questions": []})
+    data.setdefault("state", {"version": 1, "current_focus": [], "open_questions": [], "findings_since_review": 0})
+    data["state"].setdefault("findings_since_review", 0)
     data.setdefault("decisions", [])
     data.setdefault("mistakes", [])
     data.setdefault("findings", [])
@@ -192,9 +198,17 @@ def add_finding(question: str, conclusion: str, tags: list[str], project: str = 
         "created_at": _now(),
     }
     db["findings"].append(entry)
+    db["state"]["findings_since_review"] += 1
     db["state"]["version"] += 1
     save_db(db)
-    return entry
+    result = dict(entry)
+    if db["state"]["findings_since_review"] >= REVIEW_THRESHOLD:
+        result["consolidation_suggested"] = True
+        result["consolidation_hint"] = (
+            f"{db['state']['findings_since_review']} new findings since last review. "
+            "Ask the user whether to organize them, then call consolidate_findings()."
+        )
+    return result
 
 
 # ── Mistakes ──────────────────────────────────────────────────────────────────
@@ -262,10 +276,57 @@ def validate_plan(plan: str, current_project: str) -> dict:
     same  = [m for m in matches if m["project"] == current_project]
     other = [m for m in matches if m["project"] != current_project]
 
+    prior = []
+    for f in db["findings"]:
+        overlap = {t for t in f.get("tags", []) if _tag_matches(t, plan_keywords)}
+        if overlap:
+            prior.append({
+                "type":         "finding",
+                "id":           f["id"],
+                "project":      f.get("project", "unknown"),
+                "question":     f["question"],
+                "conclusion":   f["conclusion"],
+                "matched_tags": list(overlap),
+                "created_at":   f.get("updated_at") or f.get("created_at", ""),
+            })
+    prior.sort(key=lambda m: m["created_at"], reverse=True)
+
     return {
-        "conflicts":  same,
-        "references": other,
+        "conflicts":      same,
+        "references":     other,
+        "prior_analysis": prior,
     }
+
+
+# ── Consolidate ───────────────────────────────────────────────────────────────
+
+@mcp.tool()
+def consolidate_findings() -> dict:
+    """Returns decisions and findings grouped by tag for review, then resets the counter.
+    Call when consolidation_suggested is returned by add_finding and the user agrees.
+    Use the grouped view to spot duplicates or outdated entries, then clean up with
+    add_finding (upsert) or delete_entry. Resets findings_since_review to 0."""
+    db = load_db()
+    groups: dict[str, dict] = {}
+    for decision in db["decisions"]:
+        for tag in decision.get("tags", []):
+            groups.setdefault(tag, {"decisions": [], "findings": []})
+            groups[tag]["decisions"].append({
+                "id": decision["id"], "title": decision["title"],
+                "reason": decision["reason"], "project": decision.get("project", "unknown"),
+            })
+    for finding in db["findings"]:
+        for tag in finding.get("tags", []):
+            groups.setdefault(tag, {"decisions": [], "findings": []})
+            groups[tag]["findings"].append({
+                "id": finding["id"], "question": finding["question"],
+                "conclusion": finding["conclusion"], "project": finding.get("project", "unknown"),
+                "updated_at": finding.get("updated_at"),
+            })
+    db["state"]["findings_since_review"] = 0
+    db["state"]["version"] += 1
+    save_db(db)
+    return {"groups": groups, "total_tags": len(groups)}
 
 
 # ── Edit / Delete ─────────────────────────────────────────────────────────────
